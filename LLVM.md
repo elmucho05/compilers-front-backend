@@ -73,41 +73,25 @@ se facciamo `opt` senza comandi, applica i passi in modo default. possiamo quind
 
 L'opzione -O0 ti dice di non ottimizzare. Aggiungendo il flag `-Rpass=.*` dicendo in modalità verbose quali passi sono stati invocati con -O2 e con -O0.
 
-
-
 Se analizzi il codice della funzione loop, avendo dato il flag -O2, abbiamo una IR ottimizzata. Notiamo che da nessuna parte compare la chiamta della funzione `g_incr()`
-
-
 
 `clang -O2 -Rpass=.* Loop.c `. Essendo **clang** un driver, esegue tutta la toolchain.
 
 Abbiamo un errore di *linking* il che ci dice che manca il main. Se ci fossimo perfati alla fase di generazione di codice non avremmo avuto problemi.
 
-
-
 `-S` : si ferma alla compilazione --> da in output un file assembly
 
 `-c` : genera un file oggetto.
-
-
 
 **Passi applicati**
 
 Notiamo dalla modalità verbose che il passo che ottimizza il codice, ha rimosso la chiamata e l'ha espansa col suo codice. E' questo il motivo per cui non vediamo più la chiamata a funzione.
 
-
-
 *LoopInvariantCodemotion*
 
 Cerca stmt che sono invarianti dal loop e sposta i statement fupri dal loop, cosiché non eseguiamo codice inutile tante volte.
 
-
-
 Se confrontiamo il codice prodotto da -O2 e -O0, vediamo che ci sono più ottimizzazioni e che in O0 appare la chiamata a funzione.
-
-
-
-
 
 #### Scrivere un Passo LLVM
 
@@ -132,8 +116,6 @@ PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 #endif // LLVM_TRANSFORMS_TESTPASS _H
 ```
 
-
-
 ```cpp
 #include "llvm/Transforms/Utils/TestPass.h"
 using namespace llvm;
@@ -144,20 +126,92 @@ return PreservedAnalyses::all();
 }
 ```
 
-
-
 Ricordandoci la struttura, abbiamo Modules --> Functions --> CFG (BB) --> Instructions.
 
 Noi abbiamo creato un passo che lavora su Functions, il pass manager invoca il metodo run per la funzione Loop e g_incr.
 
-
-
 Sto invocando il metodo getname sull'oggetto getfuncions
-
-
 
 Dobbiamo modificare il file CMakeLists.cpp, aaggiungendo il file TestPass.cpp
 
+Il MODULE_PASS, tratta i tipi di parametri di funzione, se come argomento ci hai passato una function, non andrà mai, perché lui capisce che si aspetta una funzione.
+
+#### I passi di LLVM
+
+L'ottimizzatore del middle-end è l'opt. 
+
+La IR usa la forma SSA, Static Single Assignment, per la quale una var,non può essere definita più di una volta. Crei una nova versione della variabile una volta che incontro una nuova *definizione* di essa.
+
+- *posso rimuoverla perché non ha **usi**.*  
+
+La notazione SSA è molto importante per capire quale parte di codice è DEAD CODE, e quindi la posso eliminare. 
+
+*Come llvm implementa la forma SSA*?
+
+La gerarchia di classi, sfrutta una rappresentazione del tipo *User - Use - Value*
+
+```assembly
+%2 = add %1, 0
+%3 = mul %2, 2
+```
+
+SE tolgo la prima riga, la seconda riga non trova %2. Devo quindi aggiornare gli USI che coinvolgono le istruzioni nel Basic Block.
+
+`%3 = mul %1, 2` --> aggiorno il puntatore alla variabile che devo usare. 
+
+Le *Instruction* LLVM ereditano dalla classe Value.
+
+Ma ereditano anche dalla classe *User*. Quindi esiste una legame tra instruction e i suoi usi.
+
+![](/home/gerti/.var/app/com.github.marktext.marktext/config/marktext/images/2024-03-22-10-04-42-image.png)
 
 
-:
+
+Per vedere gli usi delle istruzioni
+
+```assembly
+User &Inst = …
+for (auto Iter = Inst.op_begin(); Iter != Inst.op_end(); ++Iter)
+{ Value *Operand = *Iter; }
+Se eseguo questo codice per analizzare l’istruzione
+%2 = add %1, 0
+verranno estratti gli operandi
+%1, 0
+```
+
+La parte diversa è quella degli USEE, usanti.
+
+Una cosa diversa da come interpretiamo noi, una Intruction è anche uno Usee.
+
+- la riposta sta nel fatto che noi %2 = add %1, 0
+
+- la macchina la intepresta come : %2 è la rappresentaizone Value dell'istruzione add %1, 0
+
+
+
+Se la fun usa qualcosa:
+
+```assembly
+for (auto Iter = Inst.op_begin(); Iter != Inst.op_end(); ++Iter)
+{ Value *Operand = *Iter; }
+```
+
+
+
+Se invece sono usato da qualucuno, scorro la lista dei miei USER, chi mi usa
+
+```assembly
+for (auto Iter = Inst.user_begin(); Iter != Inst.user_end(); ++Iter)
+{ User *InstUser = *Iter; }
+→ Instruction mul %2, 2 (oppure Value %3)
+```
+
+Se la stampo come Value, ti esce la %3. 
+
+```assembly
+y = p + 1;
+y = q * 2;
+z = y + 3;
+```
+
+LLVM fa la forma SSA, quindi quando ridefinisci y, avrai y1 e y2.
